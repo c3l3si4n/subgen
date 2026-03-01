@@ -105,8 +105,7 @@ def preprocess(
     sort_cmd = [
         "sort",
         "-t", "\t",          # tab delimiter
-        "-k1,1", "-k2,2",   # sort by root domain, then prefix
-        "-u",                # deduplicate identical lines (root+prefix)
+        "-k1,1",             # sort by root domain (for grouping)
         f"--buffer-size={sort_buffer_size}",
         f"--parallel={sort_parallel}",
         f"--temporary-directory={tmp_dir}",
@@ -131,7 +130,7 @@ def preprocess(
         open(val_path, "w") as f_val,
     ):
         current_root = None
-        current_subs: list[str] = []
+        current_subs: set[str] = set()
 
         def flush_group():
             nonlocal train_count, val_count, total_subs, total_roots
@@ -139,7 +138,7 @@ def preprocess(
                 return
 
             total_roots += 1
-            subs = current_subs
+            subs = list(current_subs)
 
             # Apply per-domain cap
             if max_subs_per_domain and len(subs) > max_subs_per_domain:
@@ -162,8 +161,8 @@ def preprocess(
             if root != current_root:
                 flush_group()
                 current_root = root
-                current_subs = []
-            current_subs.append(prefix)
+                current_subs = set()
+            current_subs.add(prefix)
 
         flush_group()  # flush last group
 
