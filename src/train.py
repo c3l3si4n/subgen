@@ -41,8 +41,8 @@ def main():
     # Precision and hardware
     parser.add_argument("--bf16", action="store_true", default=True)
     parser.add_argument("--no-bf16", action="store_true")
-    parser.add_argument("--no-torch-compile", action="store_true",
-                        help="Disable torch.compile (use if ROCm has issues)")
+    parser.add_argument("--torch-compile", action="store_true",
+                        help="Enable torch.compile (may not work on all CUDA/ROCm versions)")
 
     # Logging
     parser.add_argument("--wandb-project", type=str, default="subgen")
@@ -92,7 +92,7 @@ def main():
         dataloader_pin_memory=True,
         remove_unused_columns=False,
         gradient_checkpointing=True,
-        torch_compile=not args.no_torch_compile,
+        torch_compile=args.torch_compile,
     )
 
     if not args.no_wandb:
