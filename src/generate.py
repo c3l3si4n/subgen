@@ -68,7 +68,7 @@ def _fit_prefixes_to_context(
     known_prefixes: list[str],
     tokenizer: PreTrainedTokenizerFast,
     max_context: int = 512,
-    reserve_for_generation: int = 128,
+    reserve_for_generation: int = 384,
 ) -> list[str]:
     """Sample a random subset of known prefixes that fits within context."""
     max_prompt_tokens = max_context - reserve_for_generation
@@ -99,6 +99,7 @@ def generate_subdomains(
     root_domain: str,
     known_prefixes: list[str] | None = None,
     num_samples: int = 5,
+    batch_size: int = 16,
     temperature: float = 0.8,
     top_p: float = 0.95,
     top_k: int = 50,
@@ -107,7 +108,8 @@ def generate_subdomains(
     """Generate subdomain candidates for a target domain.
 
     Returns full FQDNs (prefix + root_domain). Each sample uses a different
-    random subset of known prefixes that fits within context.
+    random subset of known prefixes that fits within context. Within each
+    sample, batch_size sequences are generated in parallel.
     """
     all_prefixes = set()
     known = known_prefixes or []
@@ -124,6 +126,7 @@ def generate_subdomains(
         outputs = model.generate(
             **inputs,
             max_new_tokens=max_new_tokens,
+            num_return_sequences=batch_size,
             temperature=temperature,
             top_p=top_p,
             top_k=top_k,
@@ -132,9 +135,10 @@ def generate_subdomains(
             pad_token_id=tokenizer.pad_token_id,
         )
 
-        generated_text = tokenizer.decode(outputs[0], skip_special_tokens=False)
-        prefixes = parse_prefixes(generated_text, root_domain)
-        all_prefixes.update(prefixes)
+        for seq in outputs:
+            generated_text = tokenizer.decode(seq, skip_special_tokens=False)
+            prefixes = parse_prefixes(generated_text, root_domain)
+            all_prefixes.update(prefixes)
 
     # Remove known prefixes from results
     if known:
@@ -185,7 +189,9 @@ def main():
     parser.add_argument("--wordlist", type=str, default=None,
                         help="Path to subdomain wordlist (e.g. subfinder output)")
     parser.add_argument("--num-samples", type=int, default=5,
-                        help="Number of generation runs")
+                        help="Number of generation runs (each with different context)")
+    parser.add_argument("--batch-size", type=int, default=16,
+                        help="Sequences to generate in parallel per sample")
     parser.add_argument("--temperature", type=float, default=0.8)
     parser.add_argument("--top-p", type=float, default=0.95)
     parser.add_argument("--top-k", type=int, default=50)
@@ -217,6 +223,7 @@ def main():
         root_domain,
         known,
         args.num_samples,
+        args.batch_size,
         args.temperature,
         args.top_p,
         args.top_k,

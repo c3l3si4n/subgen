@@ -1,8 +1,8 @@
 # Data & model artifacts
-data/
-dataset/
-checkpoints/
-tokenizer/
+/data/
+/dataset/
+/checkpoints/
+/tokenizer/
 
 # Weights & Biases
 wandb/
