@@ -1,0 +1,40 @@
+# Data & model artifacts
+data/
+dataset/
+checkpoints/
+tokenizer/
+
+# Weights & Biases
+wandb/
+
+# Torch compile cache
+tunableop_results*.csv
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Environment
+.env
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Misc
+*.bin
+*.memmap
+a.txt
