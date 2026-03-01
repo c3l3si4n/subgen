@@ -105,8 +105,8 @@ def preprocess(
     sort_cmd = [
         "sort",
         "-t", "\t",          # tab delimiter
-        "-k1,1",             # sort by root domain
-        "-u",                # deduplicate identical root+prefix pairs
+        "-k1,1", "-k2,2",   # sort by root domain, then prefix
+        "-u",                # deduplicate identical lines (root+prefix)
         f"--buffer-size={sort_buffer_size}",
         f"--parallel={sort_parallel}",
         f"--temporary-directory={tmp_dir}",
