@@ -41,8 +41,8 @@ def main():
     # Precision and hardware
     parser.add_argument("--bf16", action="store_true", default=True)
     parser.add_argument("--no-bf16", action="store_true")
-    parser.add_argument("--torch-compile", action="store_true",
-                        help="Enable torch.compile (may not work on all CUDA/ROCm versions)")
+    parser.add_argument("--no-torch-compile", action="store_true",
+                        help="Disable torch.compile")
 
     # Logging
     parser.add_argument("--wandb-project", type=str, default="subgen")
@@ -51,6 +51,11 @@ def main():
     args = parser.parse_args()
 
     use_bf16 = args.bf16 and not args.no_bf16
+
+    # Work around PyTorch Inductor TF32 API conflict (pytorch/pytorch#166387)
+    import torch
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
 
     # Load tokenizer
     tokenizer = PreTrainedTokenizerFast.from_pretrained(args.tokenizer_dir)
@@ -92,7 +97,7 @@ def main():
         dataloader_pin_memory=True,
         remove_unused_columns=False,
         gradient_checkpointing=True,
-        torch_compile=args.torch_compile,
+        torch_compile=not args.no_torch_compile,
     )
 
     if not args.no_wandb:
