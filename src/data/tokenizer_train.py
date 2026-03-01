@@ -13,6 +13,14 @@ from tokenizers.normalizers import Lowercase
 from transformers import PreTrainedTokenizerFast
 
 
+def _line_iterator(input_files: list[str]):
+    """Yield lines from input files without loading them into memory."""
+    for path in input_files:
+        with open(path, "r") as f:
+            for line in f:
+                yield line.rstrip("\n")
+
+
 def train_tokenizer(
     input_files: list[str],
     output_dir: str,
@@ -36,7 +44,7 @@ def train_tokenizer(
     )
 
     print(f"Training tokenizer on {len(input_files)} file(s)...")
-    tokenizer.train(input_files, trainer)
+    tokenizer.train_from_iterator(_line_iterator(input_files), trainer=trainer)
     print(f"Vocabulary size: {tokenizer.get_vocab_size()}")
 
     # Wrap as PreTrainedTokenizerFast for HuggingFace Trainer compatibility
