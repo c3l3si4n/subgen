@@ -140,6 +140,10 @@ def preprocess(
             total_roots += 1
             subs = list(current_subs)
 
+            # Skip domains with fewer than 2 subdomains
+            if len(subs) < 2:
+                return
+
             # Apply per-domain cap
             if max_subs_per_domain and len(subs) > max_subs_per_domain:
                 subs = random.sample(subs, max_subs_per_domain)
