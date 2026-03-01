@@ -12,6 +12,7 @@ Uses constant memory regardless of input size.
 
 import argparse
 import hashlib
+import multiprocessing
 import os
 import random
 import subprocess
@@ -81,6 +82,50 @@ class FastTLDExtractor:
         return f"{domain}.{suffix}", subdomain
 
 
+_worker_suffixes: set[str] | None = None
+
+
+def _init_worker(suffixes: set[str]):
+    """Initialize per-worker suffix set (avoids pickling the extractor)."""
+    global _worker_suffixes
+    _worker_suffixes = suffixes
+
+
+def _extract_batch(lines: list[str]) -> list[str]:
+    """Process a batch of FQDNs, return TSV lines 'root\\tprefix'."""
+    suffixes = _worker_suffixes
+    out = []
+    for line in lines:
+        fqdn = line.strip().rstrip(".")
+        if not fqdn:
+            continue
+        labels = fqdn.lower().split(".")
+        n = len(labels)
+        if n < 3:
+            continue
+
+        # Find longest matching suffix
+        root = subdomain = None
+        for i in range(max(0, n - 4), n - 1):
+            candidate = ".".join(labels[i:])
+            if candidate in suffixes:
+                domain_idx = i - 1
+                if domain_idx < 0:
+                    break
+                root = f"{labels[domain_idx]}.{candidate}"
+                subdomain = ".".join(labels[:domain_idx])
+                break
+
+        if root is None:
+            # Fallback: assume last label is TLD
+            root = f"{labels[-2]}.{labels[-1]}"
+            subdomain = ".".join(labels[:-2])
+
+        if subdomain:
+            out.append(f"{root}\t{subdomain}\n")
+    return out
+
+
 def build_sequence(root_domain: str, subdomains: list[str]) -> str:
     """Build a training sequence from root domain and its subdomains."""
     parts = [BOS, root_domain]
@@ -117,26 +162,45 @@ def preprocess(
     # Use output_dir for sort temp files if not specified
     tmp_dir = sort_tmp_dir or output_dir
 
-    # Phase 1: Extract root/prefix pairs to temp file (streaming, constant memory)
+    # Phase 1: Extract root/prefix pairs to temp file (parallel across CPU cores)
     print("Phase 1: Extracting root/prefix pairs...")
     extractor = FastTLDExtractor()
     pairs_path = os.path.join(tmp_dir, "_pairs.tsv")
 
-    buf_size = 8 * 1024 * 1024  # 8MB I/O buffers
-    with open(input_path, "r", buffering=buf_size) as f_in, \
-         open(pairs_path, "w", buffering=buf_size) as f_out:
-        extract = extractor.extract  # avoid attribute lookup in hot loop
+    num_workers = min(multiprocessing.cpu_count(), 16)
+    batch_size = 10_000
+    print(f"Using {num_workers} workers, batch size {batch_size}")
+
+    def read_batches(path, max_lines=None):
+        batch = []
+        count = 0
+        with open(path, "r", buffering=8 * 1024 * 1024) as f:
+            for line in f:
+                if max_lines and count >= max_lines:
+                    break
+                batch.append(line)
+                count += 1
+                if len(batch) >= batch_size:
+                    yield batch
+                    batch = []
+        if batch:
+            yield batch
+
+    with open(pairs_path, "w", buffering=8 * 1024 * 1024) as f_out, \
+         multiprocessing.Pool(num_workers, initializer=_init_worker,
+                              initargs=(extractor._suffixes,)) as pool:
         write = f_out.write
-        for i, line in enumerate(tqdm(f_in, desc="Extracting")):
-            if max_lines and i >= max_lines:
-                break
-            fqdn = line.strip().rstrip(".")
-            if not fqdn:
-                continue
-            result = extract(fqdn)
-            if result is None:
-                continue
-            write(f"{result[0]}\t{result[1]}\n")
+        total = 0
+        for result_batch in pool.imap(
+            _extract_batch,
+            tqdm(read_batches(input_path, max_lines), desc="Extracting",
+                 unit="batch"),
+            chunksize=4,
+        ):
+            for tsv_line in result_batch:
+                write(tsv_line)
+            total += len(result_batch)
+    print(f"Extracted {total} pairs")
 
     # Phase 2: Sort by root domain and deduplicate (external sort, handles any file size)
     print("Phase 2: Sorting and deduplicating...")

@@ -11,8 +11,11 @@ Zero-copy reads from disk — no RAM pressure at scale.
 """
 
 import argparse
+import multiprocessing
 import os
 import random
+import shutil
+import tempfile
 
 import numpy as np
 import torch
@@ -22,6 +25,29 @@ from transformers import PreTrainedTokenizerFast
 
 MAX_SEQ_LEN = 512
 
+_worker_tokenizer: PreTrainedTokenizerFast | None = None
+_worker_max_seq_len: int = MAX_SEQ_LEN
+
+
+def _init_tok_worker(tokenizer_dir: str, max_seq_len: int):
+    global _worker_tokenizer, _worker_max_seq_len
+    _worker_tokenizer = PreTrainedTokenizerFast.from_pretrained(tokenizer_dir)
+    _worker_max_seq_len = max_seq_len
+
+
+def _tokenize_batch(lines: list[str]) -> list[list[int]]:
+    """Tokenize a batch of sequence lines."""
+    results = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        token_ids = _worker_tokenizer.encode(line)
+        if len(token_ids) > _worker_max_seq_len:
+            token_ids = token_ids[:_worker_max_seq_len]
+        results.append(token_ids)
+    return results
+
 
 def pretokenize(
     input_path: str,
@@ -30,7 +56,6 @@ def pretokenize(
     max_seq_len: int = MAX_SEQ_LEN,
 ):
     """Tokenize all sequences and write to a flat memmap file (one per row, padded)."""
-    # First pass: count sequences
     print(f"Counting sequences in {input_path}...")
     num_seqs = 0
     with open(input_path, "r") as f:
@@ -38,12 +63,9 @@ def pretokenize(
             num_seqs += 1
     print(f"Found {num_seqs} sequences")
 
-    # Create memmap
     mmap = np.memmap(output_path, dtype=np.uint16, mode="w+", shape=(num_seqs, max_seq_len))
-
     pad_id = tokenizer.pad_token_id
 
-    # Second pass: tokenize and write
     print(f"Tokenizing to {output_path}...")
     with open(input_path, "r") as f:
         for i, line in enumerate(tqdm(f, total=num_seqs, desc="Tokenizing")):
@@ -51,13 +73,9 @@ def pretokenize(
             if not line:
                 mmap[i] = pad_id
                 continue
-
             token_ids = tokenizer.encode(line)
-
             if len(token_ids) > max_seq_len:
                 token_ids = token_ids[:max_seq_len]
-
-            # Pad to max_seq_len
             padded = token_ids + [pad_id] * (max_seq_len - len(token_ids))
             mmap[i] = np.array(padded, dtype=np.uint16)
 
@@ -73,27 +91,40 @@ def pretokenize_packed(
     max_seq_len: int = MAX_SEQ_LEN,
     seed: int = 42,
 ):
-    """Tokenize sequences and greedily bin-pack into fixed-width rows.
-
-    Multiple sequences are concatenated into each row separated by natural
-    <eos><bos> boundaries (already present in the sequence text). Remainder
-    tokens in each row are padded.
-    """
+    """Tokenize sequences in parallel, then greedily bin-pack into fixed-width rows."""
     pad_id = tokenizer.pad_token_id
 
-    # Tokenize all sequences into memory
-    print(f"Tokenizing sequences from {input_path}...")
-    all_token_ids = []
-    with open(input_path, "r") as f:
-        for line in tqdm(f, desc="Tokenizing"):
-            line = line.strip()
-            if not line:
-                continue
-            token_ids = tokenizer.encode(line)
-            if len(token_ids) > max_seq_len:
-                token_ids = token_ids[:max_seq_len]
-            all_token_ids.append(token_ids)
+    # Save tokenizer to temp dir for worker processes
+    tmp_tok_dir = tempfile.mkdtemp(prefix="tok_")
+    tokenizer.save_pretrained(tmp_tok_dir)
 
+    num_workers = min(multiprocessing.cpu_count(), 16)
+    batch_size = 5_000
+    print(f"Tokenizing with {num_workers} workers...")
+
+    def read_batches(path):
+        batch = []
+        with open(path, "r", buffering=8 * 1024 * 1024) as f:
+            for line in f:
+                batch.append(line)
+                if len(batch) >= batch_size:
+                    yield batch
+                    batch = []
+        if batch:
+            yield batch
+
+    # Parallel tokenization into memory
+    all_token_ids = []
+    with multiprocessing.Pool(num_workers, initializer=_init_tok_worker,
+                              initargs=(tmp_tok_dir, max_seq_len)) as pool:
+        for result_batch in pool.imap(
+            _tokenize_batch,
+            tqdm(read_batches(input_path), desc="Tokenizing", unit="batch"),
+            chunksize=4,
+        ):
+            all_token_ids.extend(result_batch)
+
+    shutil.rmtree(tmp_tok_dir, ignore_errors=True)
     print(f"Tokenized {len(all_token_ids)} sequences")
 
     # Shuffle for diversity before packing
@@ -109,32 +140,25 @@ def pretokenize_packed(
         seq_len = len(token_ids)
 
         if current_len + seq_len <= max_seq_len:
-            # Fits in current row
             current_row.extend(token_ids)
             current_len += seq_len
         else:
-            # Finalize current row
             if current_row:
                 padded = current_row + [pad_id] * (max_seq_len - current_len)
                 rows.append(padded)
 
-            # Start new row with this sequence
             if seq_len <= max_seq_len:
                 current_row = list(token_ids)
                 current_len = seq_len
             else:
-                # Sequence too long even alone — truncate
                 current_row = list(token_ids[:max_seq_len])
                 current_len = max_seq_len
 
-    # Don't forget the last row
     if current_row:
         padded = current_row + [pad_id] * (max_seq_len - current_len)
         rows.append(padded)
 
     num_rows = len(rows)
-    total_tokens = sum(len(ids) for ids in all_token_ids)
-    useful_tokens = num_rows * max_seq_len
     non_pad = sum(max_seq_len - row.count(pad_id) if isinstance(row, list) else max_seq_len for row in rows)
 
     print(f"Packed {len(all_token_ids)} sequences into {num_rows} rows")
@@ -166,14 +190,9 @@ class DomainDataset(Dataset):
 
     def __getitem__(self, idx):
         tokens = torch.from_numpy(self.data[idx].astype(np.int64))
-
-        # Attention mask: 1 for real tokens, 0 for padding
         attention_mask = (tokens != self.pad_token_id).long()
-
-        # Labels: mask padding positions with -100 so they're ignored in loss
         labels = tokens.clone()
         labels[labels == self.pad_token_id] = -100
-
         return {
             "input_ids": tokens,
             "attention_mask": attention_mask,
@@ -195,7 +214,6 @@ def main():
     args = parser.parse_args()
 
     tokenizer = PreTrainedTokenizerFast.from_pretrained(args.tokenizer_dir)
-
     tokenize_fn = pretokenize_packed if args.packed else pretokenize
 
     for split in ["train", "val"]:
