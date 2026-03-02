@@ -228,11 +228,9 @@ class DomainDataset(Dataset):
         position_ids[is_pad] = 0
 
         labels = tokens.clone()
-        # Mask structural tokens from loss — prevents model from collapsing
-        # to always predicting <sep> (which dominates packed token counts).
-        # The model learns structure from attention patterns instead.
-        is_structural = is_pad | is_bos | (tokens == self.eos_token_id) | (tokens == self.sep_token_id)
-        labels[is_structural] = -100
+        # Mask <pad> and <bos> from loss. Keep <sep> and <eos> so the model
+        # learns to produce delimiters between prefixes and stop tokens.
+        labels[is_pad | is_bos] = -100
 
         return {
             "input_ids": tokens,
