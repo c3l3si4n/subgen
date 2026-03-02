@@ -10,6 +10,7 @@ import os
 
 from tokenizers import Tokenizer, decoders, models, pre_tokenizers, trainers
 from tokenizers.normalizers import Lowercase
+from tokenizers.pre_tokenizers import Sequence, Split
 from transformers import PreTrainedTokenizerFast
 
 
@@ -31,7 +32,10 @@ def train_tokenizer(
 
     tokenizer = Tokenizer(models.BPE())
     tokenizer.normalizer = Lowercase()
-    tokenizer.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False)
+    tokenizer.pre_tokenizer = Sequence([
+        Split(pattern=".", behavior="isolated"),
+        pre_tokenizers.ByteLevel(add_prefix_space=False),
+    ])
     tokenizer.decoder = decoders.ByteLevel()
 
     special_tokens = ["<pad>", "<bos>", "<eos>", "<sep>"]

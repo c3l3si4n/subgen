@@ -215,19 +215,13 @@ class DomainDataset(Dataset):
         doc_ids = is_bos.long().cumsum(0)
         doc_ids[is_pad] = 0
 
-        # Build position_ids that reset at each sequence boundary
-        position_ids = torch.zeros_like(tokens)
-        current_pos = 0
-        current_doc = 0
-        for i in range(self.max_seq_len):
-            d = doc_ids[i].item()
-            if d == 0:  # pad
-                break
-            if d != current_doc:
-                current_pos = 0
-                current_doc = d
-            position_ids[i] = current_pos
-            current_pos += 1
+        # Build position_ids that reset at each sequence boundary (vectorized)
+        is_boundary = torch.cat([torch.tensor([True]), doc_ids[1:] != doc_ids[:-1]])
+        arange = torch.arange(self.max_seq_len)
+        boundary_positions = arange * is_boundary.long()
+        last_boundary = torch.cummax(boundary_positions, dim=0).values
+        position_ids = arange - last_boundary
+        position_ids[is_pad] = 0
 
         labels = tokens.clone()
         labels[is_pad] = -100

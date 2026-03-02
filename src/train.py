@@ -14,7 +14,7 @@ from transformers import (
     TrainingArguments,
 )
 
-from data.dataset import DomainDataset
+from data.dataset import DomainDataset, PackedDataCollator
 from model.config import build_config, build_model
 
 
@@ -98,6 +98,7 @@ def main():
         remove_unused_columns=False,
         gradient_checkpointing=True,
         torch_compile=not args.no_torch_compile,
+        label_smoothing_factor=0.05,
     )
 
     if not args.no_wandb:
@@ -108,6 +109,7 @@ def main():
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=val_dataset,
+        data_collator=PackedDataCollator(),
         processing_class=tokenizer,
     )
 
