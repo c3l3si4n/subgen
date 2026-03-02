@@ -100,19 +100,33 @@ def generate_subdomains(
     known_prefixes: list[str] | None = None,
     num_samples: int = 5,
     batch_size: int = 16,
-    temperature: float = 0.8,
-    top_p: float = 0.95,
-    top_k: int = 50,
+    temperature: float = 0.9,
+    min_p: float = 0.05,
+    repetition_penalty: float = 1.1,
     max_new_tokens: int = 384,
+    temperature_sweep: bool = True,
 ) -> list[str]:
     """Generate subdomain candidates for a target domain.
 
     Returns full FQDNs (prefix + root_domain). Each sample uses a different
     random subset of known prefixes that fits within context. Within each
     sample, batch_size sequences are generated in parallel.
+
+    Uses min-p sampling (context-adaptive candidate filtering) instead of
+    top-p/top-k. When temperature_sweep is True, each sample uses a different
+    temperature from conservative (0.6) to exploratory (1.0).
     """
     all_prefixes = set()
     known = known_prefixes or []
+
+    if temperature_sweep and num_samples > 1:
+        # Sweep from conservative to exploratory across samples
+        temps = [
+            0.6 + (1.0 - 0.6) * i / (num_samples - 1)
+            for i in range(num_samples)
+        ]
+    else:
+        temps = [temperature] * num_samples
 
     for i in range(num_samples):
         if known:
@@ -127,9 +141,11 @@ def generate_subdomains(
             **inputs,
             max_new_tokens=max_new_tokens,
             num_return_sequences=batch_size,
-            temperature=temperature,
-            top_p=top_p,
-            top_k=top_k,
+            temperature=temps[i],
+            min_p=min_p,
+            top_p=1.0,
+            top_k=0,
+            repetition_penalty=repetition_penalty,
             do_sample=True,
             eos_token_id=tokenizer.eos_token_id,
             pad_token_id=tokenizer.pad_token_id,
@@ -192,9 +208,11 @@ def main():
                         help="Number of generation runs (each with different context)")
     parser.add_argument("--batch-size", type=int, default=16,
                         help="Sequences to generate in parallel per sample")
-    parser.add_argument("--temperature", type=float, default=0.8)
-    parser.add_argument("--top-p", type=float, default=0.95)
-    parser.add_argument("--top-k", type=int, default=50)
+    parser.add_argument("--temperature", type=float, default=0.9)
+    parser.add_argument("--min-p", type=float, default=0.05)
+    parser.add_argument("--repetition-penalty", type=float, default=1.1)
+    parser.add_argument("--no-temperature-sweep", action="store_true",
+                        help="Use fixed temperature instead of sweeping across samples")
     parser.add_argument("--max-new-tokens", type=int, default=384)
     parser.add_argument("--device", type=str, default="auto")
     parser.add_argument("--output", "-o", type=str, default=None,
@@ -225,9 +243,10 @@ def main():
         args.num_samples,
         args.batch_size,
         args.temperature,
-        args.top_p,
-        args.top_k,
+        args.min_p,
+        args.repetition_penalty,
         args.max_new_tokens,
+        temperature_sweep=not args.no_temperature_sweep,
     )
 
     print(f"\nGenerated {len(candidates)} unique subdomain candidates for {root_domain}:",

@@ -20,8 +20,23 @@ def build_config(
     pad_token_id: int = 0,
     bos_token_id: int = 1,
     eos_token_id: int = 2,
+    rope_theta: float = 500_000.0,
+    variant: str = "default",
 ) -> LlamaConfig:
-    """Build a LlamaConfig for the subdomain generation model."""
+    """Build a LlamaConfig for the subdomain generation model.
+
+    Args:
+        variant: Architecture variant to use.
+            "default" — 12 layers × 1024 hidden (~148M params)
+            "wide"    — 8 layers × 1280 hidden (~148M params, same budget)
+    """
+    if variant == "wide":
+        hidden_size = 1280
+        intermediate_size = 3584  # ~2.8× hidden, matches SwiGLU convention
+        num_hidden_layers = 8
+        num_attention_heads = 20
+        num_key_value_heads = 4
+
     config = LlamaConfig(
         vocab_size=vocab_size,
         hidden_size=hidden_size,
@@ -36,7 +51,7 @@ def build_config(
         bos_token_id=bos_token_id,
         eos_token_id=eos_token_id,
         rms_norm_eps=1e-5,
-        rope_theta=10000.0,
+        rope_theta=rope_theta,
     )
     return config
 

@@ -136,11 +136,38 @@ def build_sequence(root_domain: str, subdomains: list[str]) -> str:
     return " ".join(parts)
 
 
-def chunk_subdomains(subdomains: list[str], chunk_size: int = SUBS_PER_SEQ) -> list[list[str]]:
-    """Split subdomains into chunks, shuffling for training diversity."""
-    subs = list(subdomains)
-    random.shuffle(subs)
-    return [subs[i:i + chunk_size] for i in range(0, len(subs), chunk_size)]
+def chunk_subdomains(
+    subdomains: list[str],
+    chunk_size: int = SUBS_PER_SEQ,
+    orderings: list[str] | None = None,
+) -> list[list[str]]:
+    """Split subdomains into chunks with multiple orderings for diversity.
+
+    Each ordering strategy produces its own set of chunks. This teaches the
+    model that subdomain order is arbitrary and exposes it to more contexts.
+
+    Args:
+        orderings: List of ordering strategies to apply. Options:
+            "random" — random shuffle (original behavior)
+            "alpha"  — alphabetical order
+            "reverse" — reverse alphabetical
+            Default: ["random", "alpha", "reverse"]
+    """
+    if orderings is None:
+        orderings = ["random", "alpha", "reverse"]
+
+    all_chunks = []
+    for ordering in orderings:
+        subs = list(subdomains)
+        if ordering == "random":
+            random.shuffle(subs)
+        elif ordering == "alpha":
+            subs.sort()
+        elif ordering == "reverse":
+            subs.sort(reverse=True)
+        all_chunks.extend(subs[i:i + chunk_size] for i in range(0, len(subs), chunk_size))
+
+    return all_chunks
 
 
 def preprocess(
