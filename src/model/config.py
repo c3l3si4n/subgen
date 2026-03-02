@@ -14,13 +14,14 @@ def build_config(
     num_hidden_layers: int = 12,
     num_attention_heads: int = 16,
     num_key_value_heads: int = 4,
-    max_position_embeddings: int = 512,
+    max_position_embeddings: int = 1024,
     hidden_act: str = "silu",
     tie_word_embeddings: bool = True,
     pad_token_id: int = 0,
     bos_token_id: int = 1,
     eos_token_id: int = 2,
     rope_theta: float = 500_000.0,
+    attn_implementation: str = "sdpa",
     variant: str = "default",
 ) -> LlamaConfig:
     """Build a LlamaConfig for the subdomain generation model.
@@ -29,7 +30,13 @@ def build_config(
         variant: Architecture variant to use.
             "default" — 12 layers × 1024 hidden (~148M params)
             "wide"    — 8 layers × 1280 hidden (~148M params, same budget)
+        attn_implementation: Attention backend. "sdpa" for PyTorch native
+            (supports 4D block-diagonal masks for packed training).
+            "flash_attention_2" for FA2 inference (requires flash-attn package).
     """
+    # Pad vocab to nearest multiple of 64 for Tensor Core alignment
+    vocab_size = (vocab_size + 63) // 64 * 64
+
     if variant == "wide":
         hidden_size = 1280
         intermediate_size = 3584  # ~2.8× hidden, matches SwiGLU convention
@@ -52,6 +59,7 @@ def build_config(
         eos_token_id=eos_token_id,
         rms_norm_eps=1e-5,
         rope_theta=rope_theta,
+        attn_implementation=attn_implementation,
     )
     return config
 

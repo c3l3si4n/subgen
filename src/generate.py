@@ -13,20 +13,64 @@ from collections import Counter
 
 import torch
 import tldextract
-from transformers import LlamaForCausalLM, PreTrainedTokenizerFast
+from transformers import LlamaForCausalLM, LogitsProcessor, PreTrainedTokenizerFast
+
+
+class DNSLogitsProcessor(LogitsProcessor):
+    """Mask out tokens containing characters invalid in DNS subdomain labels.
+
+    Valid DNS characters: a-z, 0-9, hyphen (-), dot (.) for multi-level subs.
+    Special tokens (<bos>, <eos>, <sep>, <pad>) are always allowed.
+    Built once per tokenizer; the valid_token_mask is reused across calls.
+    """
+
+    def __init__(self, tokenizer: PreTrainedTokenizerFast):
+        dns_chars = set("abcdefghijklmnopqrstuvwxyz0123456789-.")
+        special_ids = set()
+        for attr in ("bos_token_id", "eos_token_id", "pad_token_id", "sep_token_id"):
+            tid = getattr(tokenizer, attr, None)
+            if tid is not None:
+                special_ids.add(tid)
+
+        vocab = tokenizer.get_vocab()
+        valid = torch.zeros(len(vocab), dtype=torch.bool)
+        for token_str, token_id in vocab.items():
+            if token_id in special_ids:
+                valid[token_id] = True
+            elif all(c in dns_chars for c in token_str):
+                valid[token_id] = True
+
+        self._valid_mask = valid
+        self._neg_inf = float("-inf")
+
+    def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> torch.FloatTensor:
+        mask = self._valid_mask.to(scores.device)
+        scores[:, ~mask] = self._neg_inf
+        return scores
 
 
 def load_model(
     model_path: str,
     device: str = "auto",
+    attn_implementation: str = "flash_attention_2",
 ) -> tuple[LlamaForCausalLM, PreTrainedTokenizerFast]:
     """Load model and tokenizer from a checkpoint directory."""
     tokenizer = PreTrainedTokenizerFast.from_pretrained(model_path)
-    model = LlamaForCausalLM.from_pretrained(
-        model_path,
-        torch_dtype=torch.bfloat16,
-        device_map=device,
-    )
+    try:
+        model = LlamaForCausalLM.from_pretrained(
+            model_path,
+            torch_dtype=torch.bfloat16,
+            device_map=device,
+            attn_implementation=attn_implementation,
+        )
+    except (ImportError, ValueError):
+        # Fall back to SDPA if flash-attn is not installed
+        model = LlamaForCausalLM.from_pretrained(
+            model_path,
+            torch_dtype=torch.bfloat16,
+            device_map=device,
+            attn_implementation="sdpa",
+        )
     model.eval()
     return model, tokenizer
 
@@ -67,8 +111,8 @@ def _fit_prefixes_to_context(
     root_domain: str,
     known_prefixes: list[str],
     tokenizer: PreTrainedTokenizerFast,
-    max_context: int = 512,
-    reserve_for_generation: int = 384,
+    max_context: int = 1024,
+    reserve_for_generation: int = 512,
 ) -> list[str]:
     """Sample a random subset of known prefixes that fits within context."""
     max_prompt_tokens = max_context - reserve_for_generation
@@ -103,7 +147,7 @@ def generate_subdomains(
     temperature: float = 0.9,
     min_p: float = 0.05,
     repetition_penalty: float = 1.1,
-    max_new_tokens: int = 384,
+    max_new_tokens: int = 512,
     temperature_sweep: bool = True,
 ) -> list[str]:
     """Generate subdomain candidates for a target domain.
@@ -116,6 +160,8 @@ def generate_subdomains(
     top-p/top-k. When temperature_sweep is True, each sample uses a different
     temperature from conservative (0.6) to exploratory (1.0).
     """
+    dns_processor = DNSLogitsProcessor(tokenizer)
+
     all_prefixes = set()
     known = known_prefixes or []
 
@@ -149,6 +195,7 @@ def generate_subdomains(
             do_sample=True,
             eos_token_id=tokenizer.eos_token_id,
             pad_token_id=tokenizer.pad_token_id,
+            logits_processor=[dns_processor],
         )
 
         for seq in outputs:
@@ -213,7 +260,7 @@ def main():
     parser.add_argument("--repetition-penalty", type=float, default=1.1)
     parser.add_argument("--no-temperature-sweep", action="store_true",
                         help="Use fixed temperature instead of sweeping across samples")
-    parser.add_argument("--max-new-tokens", type=int, default=384)
+    parser.add_argument("--max-new-tokens", type=int, default=512)
     parser.add_argument("--device", type=str, default="auto")
     parser.add_argument("--output", "-o", type=str, default=None,
                         help="Output file (default: stdout)")

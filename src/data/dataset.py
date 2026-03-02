@@ -23,7 +23,7 @@ from torch.utils.data import Dataset
 from tqdm import tqdm
 from transformers import PreTrainedTokenizerFast
 
-MAX_SEQ_LEN = 512
+MAX_SEQ_LEN = 1024
 
 _worker_tokenizer: PreTrainedTokenizerFast | None = None
 _worker_max_seq_len: int = MAX_SEQ_LEN
@@ -176,26 +176,112 @@ def pretokenize_packed(
 
 
 class DomainDataset(Dataset):
-    """PyTorch Dataset backed by a numpy memmap file."""
+    """PyTorch Dataset backed by a numpy memmap file.
 
-    def __init__(self, bin_path: str, max_seq_len: int = MAX_SEQ_LEN, pad_token_id: int = 0):
+    Handles packed rows containing multiple sequences separated by <eos><bos>
+    boundaries. Produces per-token position_ids that reset at each sequence
+    boundary, and document_ids for building block-diagonal attention masks
+    that prevent cross-sequence attention leaks.
+
+    Use PackedDataCollator with this dataset to construct proper 4D attention
+    masks for training. Requires attn_implementation="sdpa" (not FA2) since
+    SDPA supports arbitrary 4D causal masks.
+    """
+
+    def __init__(
+        self,
+        bin_path: str,
+        max_seq_len: int = MAX_SEQ_LEN,
+        pad_token_id: int = 0,
+        bos_token_id: int = 1,
+    ):
         self.data = np.memmap(bin_path, dtype=np.uint16, mode="r")
         self.num_seqs = len(self.data) // max_seq_len
         self.data = self.data.reshape(self.num_seqs, max_seq_len)
         self.max_seq_len = max_seq_len
         self.pad_token_id = pad_token_id
+        self.bos_token_id = bos_token_id
 
     def __len__(self):
         return self.num_seqs
 
     def __getitem__(self, idx):
         tokens = torch.from_numpy(self.data[idx].astype(np.int64))
-        attention_mask = (tokens != self.pad_token_id).long()
+
+        is_bos = (tokens == self.bos_token_id)
+        is_pad = (tokens == self.pad_token_id)
+
+        # Assign a document ID to each token (increments at each BOS)
+        doc_ids = is_bos.long().cumsum(0)
+        doc_ids[is_pad] = 0
+
+        # Build position_ids that reset at each sequence boundary
+        position_ids = torch.zeros_like(tokens)
+        current_pos = 0
+        current_doc = 0
+        for i in range(self.max_seq_len):
+            d = doc_ids[i].item()
+            if d == 0:  # pad
+                break
+            if d != current_doc:
+                current_pos = 0
+                current_doc = d
+            position_ids[i] = current_pos
+            current_pos += 1
+
         labels = tokens.clone()
-        labels[labels == self.pad_token_id] = -100
+        labels[is_pad] = -100
+
         return {
             "input_ids": tokens,
-            "attention_mask": attention_mask,
+            "position_ids": position_ids,
+            "labels": labels,
+            "document_ids": doc_ids,
+        }
+
+
+class PackedDataCollator:
+    """Data collator that builds 4D block-diagonal causal attention masks
+    from document_ids produced by DomainDataset.
+
+    Each packed row may contain multiple sequences (documents). This collator
+    ensures that tokens in one document cannot attend to tokens in another,
+    preventing cross-sequence information leakage during training.
+
+    The resulting attention_mask is a 4D float tensor of shape
+    (batch, 1, seq_len, seq_len) compatible with SDPA attention.
+    """
+
+    def __call__(self, features: list[dict]) -> dict:
+        batch_size = len(features)
+        seq_len = features[0]["input_ids"].shape[0]
+
+        input_ids = torch.stack([f["input_ids"] for f in features])
+        position_ids = torch.stack([f["position_ids"] for f in features])
+        labels = torch.stack([f["labels"] for f in features])
+        doc_ids = torch.stack([f["document_ids"] for f in features])
+
+        # Build 4D causal block-diagonal mask: (batch, 1, seq_len, seq_len)
+        # For each sample: mask[i, j] = 1 if token j can attend to token i
+        # Conditions: same document, causal (j >= i), both non-padding
+        causal = torch.tril(torch.ones(seq_len, seq_len, dtype=torch.bool))
+        # doc_ids: (batch, seq_len) → same_doc: (batch, seq_len, seq_len)
+        # same_doc[b, i, j] = True if tokens i and j belong to same document
+        doc_q = doc_ids.unsqueeze(1).expand(-1, seq_len, -1)  # (B, S, S)
+        doc_k = doc_ids.unsqueeze(2).expand(-1, -1, seq_len)  # (B, S, S)
+        same_doc = (doc_q == doc_k) & (doc_q != 0)  # exclude padding
+
+        # Combine: causal AND same document
+        mask = causal.unsqueeze(0) & same_doc  # (B, S, S)
+
+        # Convert to float mask for SDPA: 0.0 = attend, -inf = mask out
+        attn_mask = torch.where(mask, 0.0, float("-inf"))
+        attn_mask = attn_mask.unsqueeze(1)  # (B, 1, S, S)
+
+        return {
+            "input_ids": input_ids,
+            "attention_mask": attn_mask,
+            "position_ids": position_ids,
             "labels": labels,
         }
 
