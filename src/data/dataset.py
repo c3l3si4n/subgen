@@ -194,6 +194,8 @@ class DomainDataset(Dataset):
         max_seq_len: int = MAX_SEQ_LEN,
         pad_token_id: int = 0,
         bos_token_id: int = 1,
+        eos_token_id: int = 2,
+        sep_token_id: int = 3,
     ):
         self.data = np.memmap(bin_path, dtype=np.uint16, mode="r")
         self.num_seqs = len(self.data) // max_seq_len
@@ -201,6 +203,8 @@ class DomainDataset(Dataset):
         self.max_seq_len = max_seq_len
         self.pad_token_id = pad_token_id
         self.bos_token_id = bos_token_id
+        self.eos_token_id = eos_token_id
+        self.sep_token_id = sep_token_id
 
     def __len__(self):
         return self.num_seqs
@@ -224,7 +228,11 @@ class DomainDataset(Dataset):
         position_ids[is_pad] = 0
 
         labels = tokens.clone()
-        labels[is_pad] = -100
+        # Mask structural tokens from loss — prevents model from collapsing
+        # to always predicting <sep> (which dominates packed token counts).
+        # The model learns structure from attention patterns instead.
+        is_structural = is_pad | is_bos | (tokens == self.eos_token_id) | (tokens == self.sep_token_id)
+        labels[is_structural] = -100
 
         return {
             "input_ids": tokens,
