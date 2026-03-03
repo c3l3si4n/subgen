@@ -204,9 +204,13 @@ def generate_subdomains(
             logits_processor=[dns_processor],
         )
 
+        prompt_len = inputs["input_ids"].shape[1]
         for seq in outputs:
-            generated_text = tokenizer.decode(seq, skip_special_tokens=False)
-            print(generated_text)
+            # Only decode the newly generated tokens (exclude prompt)
+            generated_tokens = seq[prompt_len:]
+            generated_text = tokenizer.decode(generated_tokens, skip_special_tokens=False)
+            print(f"[PROMPT] {tokenizer.decode(seq[:prompt_len], skip_special_tokens=False)}", file=sys.stderr)
+            print(f"[GENERATED] {generated_text}", file=sys.stderr)
             prefixes = parse_prefixes(generated_text, root_domain)
             all_prefixes.update(prefixes)
 
