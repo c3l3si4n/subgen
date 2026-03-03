@@ -241,65 +241,46 @@ class DomainDataset(Dataset):
 
 
 class PackedDataCollator:
-    """Data collator that builds 4D block-diagonal causal attention masks
-    from document_ids produced by DomainDataset.
-
-    Each packed row may contain multiple sequences (documents). This collator
-    ensures that tokens in one document cannot attend to tokens in another,
-    preventing cross-sequence information leakage during training.
-
-    The resulting attention_mask is a 4D float tensor of shape
-    (batch, 1, seq_len, seq_len) compatible with SDPA attention.
-
-    Optimization: stores only per-row doc_ids (int16) and defers the O(B×S²)
-    mask expansion to GPU inside the model's forward pass via a custom wrapper.
-    Falls back to CPU construction when no CUDA device is available.
+    """Lightweight collator that passes doc_ids to the model for GPU-side
+    mask construction. The actual 4D attention mask is built on-device inside
+    PackedLlamaForCausalLM.forward(), eliminating the CPU bottleneck.
     """
 
     def __call__(self, features: list[dict]) -> dict:
         input_ids = torch.stack([f["input_ids"] for f in features])
         position_ids = torch.stack([f["position_ids"] for f in features])
         labels = torch.stack([f["labels"] for f in features])
-        doc_ids = torch.stack([f["document_ids"] for f in features])
-
-        # Defer mask construction — return doc_ids and build mask lazily on GPU.
-        # Trainer moves tensors to device before forward(), so we build the
-        # mask in a hook. For simplicity, build on CPU here but use int16
-        # doc_ids and bool intermediates to minimize memory and bandwidth.
-        attn_mask = _build_block_causal_mask(doc_ids)
+        # Pack doc_ids as int16 — only 2 bytes/token vs 4MB/sample for full mask
+        doc_ids = torch.stack([f["document_ids"] for f in features]).to(torch.int16)
 
         return {
             "input_ids": input_ids,
-            "attention_mask": attn_mask,
             "position_ids": position_ids,
             "labels": labels,
+            "doc_ids": doc_ids,
         }
 
 
-def _build_block_causal_mask(doc_ids: torch.Tensor) -> torch.Tensor:
-    """Build 4D block-diagonal causal mask from doc_ids.
+def build_block_causal_mask(
+    doc_ids: torch.Tensor,
+    dtype: torch.dtype = torch.bfloat16,
+) -> torch.Tensor:
+    """Build 4D block-diagonal causal mask from doc_ids on the current device.
 
     Args:
-        doc_ids: (batch, seq_len) int tensor of document IDs.
+        doc_ids: (batch, seq_len) int tensor of document IDs (on GPU).
+        dtype: Output dtype — must match model compute dtype (bf16 for GPU
+               training, float32 for CPU).
 
     Returns:
-        (batch, 1, seq_len, seq_len) bfloat16 tensor where 0.0 = attend,
-        -inf = masked. Uses bool intermediates to cut peak memory ~4x vs
-        float32 intermediates.
+        (batch, 1, seq_len, seq_len) tensor where 0.0 = attend, -inf = masked.
     """
     seq_len = doc_ids.shape[1]
-
-    # same_doc[b, i, j] = True if tokens i and j belong to same non-pad document
-    # Use views instead of expand to avoid materializing full copies
     same_doc = (doc_ids.unsqueeze(1) == doc_ids.unsqueeze(2)) & (doc_ids.unsqueeze(1) != 0)
-
-    # Apply causal constraint in-place on the bool tensor
     causal = torch.tril(torch.ones(seq_len, seq_len, dtype=torch.bool, device=doc_ids.device))
     same_doc &= causal
-
-    # Convert bool → bfloat16 mask (halves memory vs float32)
-    attn_mask = torch.where(same_doc, 0.0, float("-inf")).to(torch.bfloat16)
-    return attn_mask.unsqueeze(1)  # (B, 1, S, S)
+    attn_mask = torch.where(same_doc, 0.0, float("-inf")).to(dtype)
+    return attn_mask.unsqueeze(1)
 
 
 def main():

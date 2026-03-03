@@ -2,9 +2,13 @@
 LlamaConfig builder for ~148M parameter causal language model.
 
 Architecture: Llama-style with RoPE, RMSNorm, SwiGLU, GQA.
+PackedLlamaForCausalLM builds 4D block-diagonal attention masks on GPU
+from compact doc_ids, eliminating the CPU collator bottleneck.
 """
 
+import torch
 from transformers import LlamaConfig, LlamaForCausalLM
+from transformers.modeling_outputs import CausalLMOutputWithPast
 
 
 def build_config(
@@ -66,11 +70,31 @@ def build_config(
     return config
 
 
-def build_model(config: LlamaConfig | None = None) -> LlamaForCausalLM:
-    """Initialize a LlamaForCausalLM from scratch."""
+class PackedLlamaForCausalLM(LlamaForCausalLM):
+    """LlamaForCausalLM that builds 4D attention masks on GPU from doc_ids.
+
+    During training with packed sequences, the collator passes a compact
+    doc_ids tensor (B, S) int16 instead of a dense (B, 1, S, S) float mask.
+    This subclass intercepts doc_ids in forward(), builds the block-diagonal
+    causal mask on the current device (GPU), and passes it to the parent.
+
+    During inference (no doc_ids), falls through to standard Llama behavior.
+    """
+
+    def forward(self, doc_ids=None, **kwargs):
+        if doc_ids is not None:
+            from data.dataset import build_block_causal_mask
+            kwargs["attention_mask"] = build_block_causal_mask(
+                doc_ids, dtype=self.dtype,
+            )
+        return super().forward(**kwargs)
+
+
+def build_model(config: LlamaConfig | None = None) -> PackedLlamaForCausalLM:
+    """Initialize a PackedLlamaForCausalLM from scratch."""
     if config is None:
         config = build_config()
-    model = LlamaForCausalLM(config)
+    model = PackedLlamaForCausalLM(config)
     param_count = sum(p.numel() for p in model.parameters())
     print(f"Model parameters: {param_count:,} ({param_count / 1e6:.1f}M)")
     return model
