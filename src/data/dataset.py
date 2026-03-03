@@ -49,6 +49,43 @@ def _tokenize_batch(lines: list[str]) -> list[list[int]]:
     return results
 
 
+def _tokenize_and_pack_batch(lines: list[str]) -> list[list[int]]:
+    """Tokenize AND pack in workers to distribute CPU load across cores."""
+    rows = []
+    current_row = []
+    current_len = 0
+    pad_id = _worker_tokenizer.pad_token_id
+    max_len = _worker_max_seq_len
+
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+
+        token_ids = _worker_tokenizer.encode(line)
+        seq_len = len(token_ids)
+
+        if seq_len > max_len:
+            token_ids = token_ids[:max_len]
+            seq_len = max_len
+
+        if current_len + seq_len <= max_len:
+            current_row.extend(token_ids)
+            current_len += seq_len
+        else:
+            padded = current_row + [pad_id] * (max_len - current_len)
+            rows.append(padded)
+            current_row = list(token_ids)
+            current_len = seq_len
+
+    # Flush last row of this batch
+    if current_row:
+        padded = current_row + [pad_id] * (max_len - current_len)
+        rows.append(padded)
+
+    return rows
+
+
 def pretokenize(
     input_path: str,
     output_path: str,
@@ -91,11 +128,12 @@ def pretokenize_packed(
     max_seq_len: int = MAX_SEQ_LEN,
     seed: int = 42,
 ):
-    """Tokenize sequences and stream into greedy bin-packing.
+    """Tokenize and pack sequences in parallel across CPU cores.
 
-    Input is assumed to be pre-shuffled (by preprocess.py Phase 4), so we
-    stream directly from tokenization into packing without buffering the
-    full dataset in RAM. Handles 700M+ line inputs without OOM.
+    Input is assumed to be pre-shuffled (by preprocess.py Phase 4).
+    Each worker tokenizes AND packs its batch into rows, so the main
+    thread only collects finished rows and writes to disk. Handles
+    700M+ line inputs without OOM.
     """
     pad_id = tokenizer.pad_token_id
 
@@ -105,7 +143,7 @@ def pretokenize_packed(
 
     num_workers = min(multiprocessing.cpu_count(), 16)
     batch_size = 5_000
-    print(f"Tokenizing with {num_workers} workers...")
+    print(f"Tokenizing & packing with {num_workers} workers...")
 
     def read_batches(path):
         batch = []
@@ -118,49 +156,23 @@ def pretokenize_packed(
         if batch:
             yield batch
 
-    # Stream tokenization directly into greedy bin-packing (no full-dataset buffer)
+    # Workers tokenize + pack in parallel; main thread collects finished rows
     rows = []
-    current_row = []
-    current_len = 0
-    total_seqs = 0
-
     with multiprocessing.Pool(num_workers, initializer=_init_tok_worker,
                               initargs=(tmp_tok_dir, max_seq_len)) as pool:
-        for result_batch in pool.imap(
-            _tokenize_batch,
+        for packed_rows in pool.imap(
+            _tokenize_and_pack_batch,
             tqdm(read_batches(input_path), desc="Tokenizing & packing", unit="batch"),
             chunksize=4,
         ):
-            for token_ids in result_batch:
-                total_seqs += 1
-                seq_len = len(token_ids)
-
-                if current_len + seq_len <= max_seq_len:
-                    current_row.extend(token_ids)
-                    current_len += seq_len
-                else:
-                    if current_row:
-                        padded = current_row + [pad_id] * (max_seq_len - current_len)
-                        rows.append(padded)
-
-                    if seq_len <= max_seq_len:
-                        current_row = list(token_ids)
-                        current_len = seq_len
-                    else:
-                        current_row = list(token_ids[:max_seq_len])
-                        current_len = max_seq_len
-
-    if current_row:
-        padded = current_row + [pad_id] * (max_seq_len - current_len)
-        rows.append(padded)
+            rows.extend(packed_rows)
 
     shutil.rmtree(tmp_tok_dir, ignore_errors=True)
 
     num_rows = len(rows)
     non_pad = sum(max_seq_len - row.count(pad_id) if isinstance(row, list) else max_seq_len for row in rows)
 
-    print(f"Packed {total_seqs} sequences into {num_rows} rows")
-    print(f"Avg sequences per row: {total_seqs / num_rows:.1f}")
+    print(f"Packed into {num_rows} rows")
     print(f"Packing efficiency: {non_pad / (num_rows * max_seq_len) * 100:.1f}%")
 
     # Write to memmap
@@ -298,8 +310,14 @@ def build_block_causal_mask(
     same_doc = doc_ids.unsqueeze(1) == doc_ids.unsqueeze(2)
     if causal_mask is None:
         causal_mask = torch.tril(torch.ones(seq_len, seq_len, dtype=torch.bool, device=doc_ids.device))
-    same_doc &= causal_mask[:seq_len, :seq_len]
-    attn_mask = torch.where(same_doc, 0.0, float("-inf")).to(dtype)
+    valid_attend = same_doc & causal_mask[:seq_len, :seq_len]
+
+    # In-place fill avoids the torch.where intermediate tensor allocation
+    attn_mask = torch.full(
+        (doc_ids.shape[0], seq_len, seq_len), float("-inf"),
+        dtype=dtype, device=doc_ids.device,
+    )
+    attn_mask.masked_fill_(valid_attend, 0.0)
     return attn_mask.unsqueeze(1)
 
 
