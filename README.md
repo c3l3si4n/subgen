@@ -18,7 +18,7 @@ Takes a CSV/text file of FQDNs, groups subdomains by root domain, and builds tra
 PYTHONPATH=src python -m data.preprocess --input dataset/domains_export.csv --output-dir data
 ```
 
-Sequence format: `<bos> example.com <sep> www <sep> mail <sep> cdn.assets <eos>`
+Sequence format: `<bos>example.com<sep>www<sep>mail<sep>cdn.assets<eos>`
 
 Subdomains are stored as prefixes only (no base domain), which keeps sequences short and prevents the model from hallucinating base domains during generation.
 
@@ -26,7 +26,7 @@ Large domain groups are chunked (~40 subdomains per sequence). Train/val split i
 
 ### 2. Train tokenizer
 
-Trains a Byte-Level BPE tokenizer (vocab size 16384) on the preprocessed sequences.
+Trains a character-level BPE tokenizer (vocab size 4096, DNS alphabet) on the preprocessed sequences.
 
 ```bash
 PYTHONPATH=src python -m data.tokenizer_train --input data/train_sequences.txt --output-dir tokenizer
@@ -95,13 +95,16 @@ PYTHONPATH=src python -m generate \
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--model-path` | required | Path to trained model |
-| `--domain` | required | Target root domain |
-| `--known` | none | Known subdomains to condition on |
+| `--domain` | — | Target root domain (inferred from wordlist if not set) |
+| `--wordlist` | — | Path to subdomain wordlist (e.g. subfinder output) |
+| `--known` | — | Known subdomain prefixes to condition on |
 | `--num-samples` | 5 | Number of generation passes |
-| `--temperature` | 0.8 | Sampling temperature |
-| `--top-p` | 0.95 | Nucleus sampling threshold |
-| `--top-k` | 50 | Top-k sampling |
-| `--max-new-tokens` | 384 | Max tokens to generate per sample |
+| `--batch-size` | 16 | Sequences per generation sample |
+| `--temperature` | 0.9 | Sampling temperature |
+| `--min-p` | 0.05 | Min-p sampling threshold |
+| `--repetition-penalty` | 1.3 | Repetition penalty for diverse output |
+| `--no-temperature-sweep` | off | Use fixed temperature instead of sweeping |
+| `--max-new-tokens` | 512 | Max tokens to generate per sample |
 
 ## Model
 
@@ -110,8 +113,8 @@ PYTHONPATH=src python -m generate \
 - **Hidden size**: 1024
 - **Layers**: 12
 - **Attention heads**: 16 (4 KV heads)
-- **Context length**: 512 tokens
-- **Vocab size**: 16384
+- **Context length**: 1024 tokens
+- **Vocab size**: 4096
 
 ## Project structure
 
@@ -124,7 +127,7 @@ subgen/
 │   ├── val_sequences.txt       # Preprocessed validation sequences
 │   ├── train.bin               # Tokenized training data (memmap)
 │   └── val.bin                 # Tokenized validation data (memmap)
-├── tokenizer/                  # Trained BPE tokenizer
+├── tokenizer/                  # Trained character-level BPE tokenizer
 ├── checkpoints/                # Training checkpoints
 ├── src/
 │   ├── data/

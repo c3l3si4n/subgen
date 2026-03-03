@@ -20,7 +20,7 @@ from transformers import PreTrainedTokenizerFast
 def parse_sequences(input_path: str) -> dict[str, list[str]]:
     """Parse train_sequences.txt and group subdomain prefixes by root domain.
 
-    Each line has format: <bos> rootdomain.com <sep> prefix1 <sep> prefix2 ... <eos>
+    Each line has format: <bos>rootdomain.com<sep>prefix1<sep>prefix2...<eos>
     Returns dict mapping root_domain -> list of all prefixes seen.
     """
     domains: dict[str, set[str]] = defaultdict(set)
@@ -84,12 +84,12 @@ def build_rl_dataset(
             # Move at least one to held-out
             held_out = [seeds.pop()]
 
-        # Build prompt in raw format: <bos> domain.com <sep> seed1 <sep> seed2 <sep>
-        prompt_parts = [f"<bos> {root_domain}"]
+        # Build prompt in raw format: <bos>domain.com<sep>seed1<sep>seed2<sep>
+        prompt_parts = [f"<bos>{root_domain}"]
         for s in seeds:
-            prompt_parts.append(f"<sep> {s}")
+            prompt_parts.append(f"<sep>{s}")
         prompt_parts.append("<sep>")
-        prompt = " ".join(prompt_parts)
+        prompt = "".join(prompt_parts)
 
         prompts.append(prompt)
         root_domains.append(root_domain)

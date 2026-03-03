@@ -25,23 +25,13 @@ def parse_sequence(line: str) -> tuple[str, list[str]] | None:
     line = line.strip()
     if not line:
         return None
-    # Format: <bos> domain.com <sep> sub1 <sep> sub2 ... <eos>
-    parts = line.split()
-    if len(parts) < 4 or parts[0] != "<bos>":
+    # Format: <bos>domain.com<sep>sub1<sep>sub2...<eos>
+    line = line.replace("<bos>", "").replace("<eos>", "").strip()
+    parts = [p.strip() for p in line.split("<sep>") if p.strip()]
+    if len(parts) < 2:
         return None
-
-    root_domain = parts[1]
-    prefixes = []
-    i = 2
-    while i < len(parts):
-        if parts[i] == "<sep>" and i + 1 < len(parts) and parts[i + 1] != "<eos>":
-            prefixes.append(parts[i + 1])
-            i += 2
-        else:
-            i += 1
-
-    if not prefixes:
-        return None
+    root_domain = parts[0]
+    prefixes = parts[1:]
     return root_domain, prefixes
 
 

@@ -133,7 +133,7 @@ def build_sequence(root_domain: str, subdomains: list[str]) -> str:
         parts.append(SEP)
         parts.append(sub)
     parts.append(EOS)
-    return " ".join(parts)
+    return "".join(parts)
 
 
 def chunk_subdomains(

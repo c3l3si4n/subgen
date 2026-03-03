@@ -13,7 +13,7 @@ from data.dataset import build_block_causal_mask
 
 
 def build_config(
-    vocab_size: int = 8192,
+    vocab_size: int = 4096,
     hidden_size: int = 1024,
     intermediate_size: int = 2816,
     num_hidden_layers: int = 12,
@@ -26,7 +26,7 @@ def build_config(
     pad_token_id: int = 0,
     bos_token_id: int = 1,
     eos_token_id: int = 2,
-    rope_theta: float = 500_000.0,
+    rope_theta: float = 100_000.0,
     attn_implementation: str = "sdpa",
     variant: str = "default",
 ) -> LlamaConfig:

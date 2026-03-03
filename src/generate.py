@@ -1,7 +1,7 @@
 """
 Inference / generation for subdomain candidates.
 
-Prompt format: <bos> targetdomain.com <sep> prefix1 <sep> prefix2 <sep>
+Prompt format: <bos>targetdomain.com<sep>prefix1<sep>prefix2<sep>
 Model generates subdomain prefixes, base domain is appended at output.
 """
 
@@ -12,8 +12,9 @@ import sys
 from collections import Counter
 
 import torch
-import tldextract
 from transformers import LlamaForCausalLM, LogitsProcessor, PreTrainedTokenizerFast
+
+from data.preprocess import FastTLDExtractor
 
 
 class DNSLogitsProcessor(LogitsProcessor):
@@ -42,10 +43,14 @@ class DNSLogitsProcessor(LogitsProcessor):
 
         self._valid_mask = valid
         self._neg_inf = float("-inf")
+        self._device_mask: torch.BoolTensor | None = None
+        self._cached_device: torch.device | None = None
 
     def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> torch.FloatTensor:
-        mask = self._valid_mask.to(scores.device)
-        scores[:, ~mask] = self._neg_inf
+        if self._cached_device != scores.device:
+            self._device_mask = self._valid_mask.to(scores.device)
+            self._cached_device = scores.device
+        scores[:, ~self._device_mask] = self._neg_inf
         return scores
 
 
@@ -86,7 +91,7 @@ def build_prompt(
             parts.append("<sep>")
             parts.append(prefix)
     parts.append("<sep>")
-    return " ".join(parts)
+    return "".join(parts)
 
 
 def parse_prefixes(text: str, root_domain: str) -> list[str]:
@@ -120,13 +125,13 @@ def _fit_prefixes_to_context(
     subs = list(known_prefixes)
     random.shuffle(subs)
 
-    base = f"<bos> {root_domain} <sep>"
+    base = f"<bos>{root_domain}<sep>"
     base_len = len(tokenizer.encode(base))
 
     selected = []
     current_len = base_len
     for prefix in subs:
-        addition = f" <sep> {prefix}"
+        addition = f"<sep>{prefix}"
         add_len = len(tokenizer.encode(addition))
         if current_len + add_len > max_prompt_tokens:
             break
@@ -146,7 +151,7 @@ def generate_subdomains(
     batch_size: int = 16,
     temperature: float = 0.9,
     min_p: float = 0.05,
-    repetition_penalty: float = 1.1,
+    repetition_penalty: float = 1.3,
     max_new_tokens: int = 512,
     temperature_sweep: bool = True,
 ) -> list[str]:
@@ -200,6 +205,7 @@ def generate_subdomains(
 
         for seq in outputs:
             generated_text = tokenizer.decode(seq, skip_special_tokens=False)
+            print(generated_text)
             prefixes = parse_prefixes(generated_text, root_domain)
             all_prefixes.update(prefixes)
 
@@ -216,7 +222,9 @@ def load_wordlist(path: str) -> tuple[str, list[str]]:
 
     Reads one FQDN per line (e.g. subfinder output), extracts the most common
     root domain, and returns (root_domain, list_of_prefixes).
+    Uses FastTLDExtractor for ~100x faster parsing than tldextract.extract().
     """
+    extractor = FastTLDExtractor()
     prefixes = []
     roots = Counter()
 
@@ -225,11 +233,11 @@ def load_wordlist(path: str) -> tuple[str, list[str]]:
             fqdn = line.strip().rstrip(".")
             if not fqdn:
                 continue
-            ext = tldextract.extract(fqdn)
-            if ext.domain and ext.suffix and ext.subdomain:
-                root = f"{ext.domain}.{ext.suffix}"
+            result = extractor.extract(fqdn)
+            if result is not None:
+                root, subdomain = result
                 roots[root] += 1
-                prefixes.append((root, ext.subdomain))
+                prefixes.append((root, subdomain))
 
     if not roots:
         print(f"Error: no valid domains found in {path}", file=sys.stderr)
@@ -257,7 +265,7 @@ def main():
                         help="Sequences to generate in parallel per sample")
     parser.add_argument("--temperature", type=float, default=0.9)
     parser.add_argument("--min-p", type=float, default=0.05)
-    parser.add_argument("--repetition-penalty", type=float, default=1.1)
+    parser.add_argument("--repetition-penalty", type=float, default=1.3)
     parser.add_argument("--no-temperature-sweep", action="store_true",
                         help="Use fixed temperature instead of sweeping across samples")
     parser.add_argument("--max-new-tokens", type=int, default=512)
