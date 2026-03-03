@@ -99,8 +99,9 @@ def parse_prefixes(text: str, root_domain: str) -> list[str]:
     parts = text.split("<sep>")
     candidates = []
     for part in parts:
-        part = part.strip()
-        part = part.replace("<bos>", "").replace("<eos>", "").strip()
+        part = part.replace("<bos>", "").replace("<eos>", "")
+        # Remove spaces — ByteLevel BPE inserts spaces between sub-word tokens
+        part = part.replace(" ", "")
         if not part:
             continue
         # Skip the root domain itself
