@@ -60,8 +60,15 @@ def main():
     # Load tokenizer
     tokenizer = PreTrainedTokenizerFast.from_pretrained(args.tokenizer_dir)
 
-    # Build model
-    config = build_config(vocab_size=len(tokenizer))
+    # Build model — use FA2 if flash-attn is installed, else SDPA fallback
+    try:
+        import flash_attn  # noqa: F401
+        attn_impl = "flash_attention_2"
+        print("Using FlashAttention 2 (optimized CUDA kernels)")
+    except ImportError:
+        attn_impl = "sdpa"
+        print("flash-attn not installed, falling back to SDPA")
+    config = build_config(vocab_size=len(tokenizer), attn_implementation=attn_impl)
     model = build_model(config)
 
     # Load datasets
@@ -96,7 +103,7 @@ def main():
         dataloader_num_workers=4,
         dataloader_pin_memory=True,
         remove_unused_columns=False,
-        gradient_checkpointing=True,
+        gradient_checkpointing=attn_impl != "flash_attention_2",
         torch_compile=not args.no_torch_compile,
         label_smoothing_factor=0.05,
     )
@@ -109,7 +116,7 @@ def main():
         args=training_args,
         train_dataset=train_dataset,
         eval_dataset=val_dataset,
-        data_collator=PackedDataCollator(),
+        data_collator=PackedDataCollator(use_fa2=attn_impl == "flash_attention_2"),
         processing_class=tokenizer,
     )
 

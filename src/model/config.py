@@ -101,11 +101,18 @@ class PackedLlamaForCausalLM(LlamaForCausalLM):
         return super().forward(**kwargs)
 
 
-def build_model(config: LlamaConfig | None = None) -> PackedLlamaForCausalLM:
-    """Initialize a PackedLlamaForCausalLM from scratch."""
+def build_model(config: LlamaConfig | None = None) -> LlamaForCausalLM:
+    """Initialize a model from scratch.
+
+    Returns PackedLlamaForCausalLM for SDPA (needs 4D block-diagonal masks),
+    or standard LlamaForCausalLM for FA2 (uses optimized kernels with 2D mask).
+    """
     if config is None:
         config = build_config()
-    model = PackedLlamaForCausalLM(config)
+    if getattr(config, "_attn_implementation", "sdpa") == "flash_attention_2":
+        model = LlamaForCausalLM(config)
+    else:
+        model = PackedLlamaForCausalLM(config)
     param_count = sum(p.numel() for p in model.parameters())
     print(f"Model parameters: {param_count:,} ({param_count / 1e6:.1f}M)")
     return model

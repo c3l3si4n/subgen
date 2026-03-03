@@ -241,24 +241,42 @@ class DomainDataset(Dataset):
 
 
 class PackedDataCollator:
-    """Lightweight collator that passes doc_ids to the model for GPU-side
-    mask construction. The actual 4D attention mask is built on-device inside
-    PackedLlamaForCausalLM.forward(), eliminating the CPU bottleneck.
+    """Collator for packed sequence training.
+
+    Supports two attention modes:
+    - flash_attention_2 (default): Passes a 2D attention mask (1=attend, 0=pad).
+      FA2 uses optimized CUDA kernels with O(N) memory. Cross-document attention
+      is naturally attenuated by position_ids that reset at boundaries (RoPE).
+    - sdpa: Passes compact doc_ids for GPU-side 4D block-diagonal mask construction
+      in PackedLlamaForCausalLM. Strict document isolation but forces SDPA math-mode
+      fallback (~3-5x slower than FA2).
     """
+
+    def __init__(self, use_fa2: bool = True, pad_token_id: int = 0):
+        self.use_fa2 = use_fa2
+        self.pad_token_id = pad_token_id
 
     def __call__(self, features: list[dict]) -> dict:
         input_ids = torch.stack([f["input_ids"] for f in features])
         position_ids = torch.stack([f["position_ids"] for f in features])
         labels = torch.stack([f["labels"] for f in features])
-        # Pack doc_ids as int16 — only 2 bytes/token vs 4MB/sample for full mask
-        doc_ids = torch.stack([f["document_ids"] for f in features]).to(torch.int16)
 
-        return {
+        batch = {
             "input_ids": input_ids,
             "position_ids": position_ids,
             "labels": labels,
-            "doc_ids": doc_ids,
         }
+
+        if self.use_fa2:
+            # FA2 needs 2D mask: 1 for real tokens, 0 for padding
+            batch["attention_mask"] = (input_ids != self.pad_token_id).long()
+        else:
+            # SDPA path: pass doc_ids for 4D mask construction on GPU
+            batch["doc_ids"] = torch.stack(
+                [f["document_ids"] for f in features]
+            ).to(torch.int16)
+
+        return batch
 
 
 def build_block_causal_mask(
