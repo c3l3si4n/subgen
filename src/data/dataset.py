@@ -264,6 +264,7 @@ class PackedDataCollator:
 def build_block_causal_mask(
     doc_ids: torch.Tensor,
     dtype: torch.dtype = torch.bfloat16,
+    causal_mask: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Build 4D block-diagonal causal mask from doc_ids on the current device.
 
@@ -271,14 +272,17 @@ def build_block_causal_mask(
         doc_ids: (batch, seq_len) int tensor of document IDs (on GPU).
         dtype: Output dtype — must match model compute dtype (bf16 for GPU
                training, float32 for CPU).
+        causal_mask: Optional pre-computed (seq_len, seq_len) bool lower-triangular
+               matrix. Passed from model's cached buffer to avoid reallocation.
 
     Returns:
         (batch, 1, seq_len, seq_len) tensor where 0.0 = attend, -inf = masked.
     """
     seq_len = doc_ids.shape[1]
     same_doc = (doc_ids.unsqueeze(1) == doc_ids.unsqueeze(2)) & (doc_ids.unsqueeze(1) != 0)
-    causal = torch.tril(torch.ones(seq_len, seq_len, dtype=torch.bool, device=doc_ids.device))
-    same_doc &= causal
+    if causal_mask is None:
+        causal_mask = torch.tril(torch.ones(seq_len, seq_len, dtype=torch.bool, device=doc_ids.device))
+    same_doc &= causal_mask[:seq_len, :seq_len]
     attn_mask = torch.where(same_doc, 0.0, float("-inf")).to(dtype)
     return attn_mask.unsqueeze(1)
 

@@ -8,7 +8,8 @@ from compact doc_ids, eliminating the CPU collator bottleneck.
 
 import torch
 from transformers import LlamaConfig, LlamaForCausalLM
-from transformers.modeling_outputs import CausalLMOutputWithPast
+
+from data.dataset import build_block_causal_mask
 
 
 def build_config(
@@ -79,13 +80,23 @@ class PackedLlamaForCausalLM(LlamaForCausalLM):
     causal mask on the current device (GPU), and passes it to the parent.
 
     During inference (no doc_ids), falls through to standard Llama behavior.
+    Saves as standard LlamaForCausalLM for seamless inference loading.
     """
+
+    def __init__(self, config):
+        super().__init__(config)
+        # Cache the causal tril mask to avoid reallocating every forward call
+        self.register_buffer(
+            "_causal_tril",
+            torch.tril(torch.ones(config.max_position_embeddings,
+                                  config.max_position_embeddings, dtype=torch.bool)),
+            persistent=False,
+        )
 
     def forward(self, doc_ids=None, **kwargs):
         if doc_ids is not None:
-            from data.dataset import build_block_causal_mask
             kwargs["attention_mask"] = build_block_causal_mask(
-                doc_ids, dtype=self.dtype,
+                doc_ids, dtype=self.dtype, causal_mask=self._causal_tril,
             )
         return super().forward(**kwargs)
 
