@@ -304,6 +304,19 @@ def preprocess(
     # Clean up sorted file
     os.unlink(sorted_path)
 
+    # Phase 4: Shuffle sequence files so same-domain chunks don't end up
+    # adjacent in the output. Prevents data leaks when packing with FA2
+    # (which uses a 2D causal mask allowing cross-document attention).
+    print("Phase 4: Shuffling sequence files...")
+    for path, count in [(train_path, train_count), (val_path, val_count)]:
+        if count == 0:
+            continue
+        with open(path, "r") as f:
+            lines = f.readlines()
+        random.shuffle(lines)
+        with open(path, "w") as f:
+            f.writelines(lines)
+
     print(f"Found {total_roots} unique root domains")
     print(f"Total subdomains: {total_subs}")
     print(f"Train sequences: {train_count}")

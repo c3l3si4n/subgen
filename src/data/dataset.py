@@ -297,7 +297,7 @@ def build_block_causal_mask(
         (batch, 1, seq_len, seq_len) tensor where 0.0 = attend, -inf = masked.
     """
     seq_len = doc_ids.shape[1]
-    same_doc = (doc_ids.unsqueeze(1) == doc_ids.unsqueeze(2)) & (doc_ids.unsqueeze(1) != 0)
+    same_doc = doc_ids.unsqueeze(1) == doc_ids.unsqueeze(2)
     if causal_mask is None:
         causal_mask = torch.tril(torch.ones(seq_len, seq_len, dtype=torch.bool, device=doc_ids.device))
     same_doc &= causal_mask[:seq_len, :seq_len]

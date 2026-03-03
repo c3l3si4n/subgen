@@ -126,13 +126,13 @@ def _fit_prefixes_to_context(
     random.shuffle(subs)
 
     base = f"<bos>{root_domain}<sep>"
-    base_len = len(tokenizer.encode(base))
+    base_len = len(tokenizer.encode(base, add_special_tokens=False))
 
     selected = []
     current_len = base_len
     for prefix in subs:
         addition = f"<sep>{prefix}"
-        add_len = len(tokenizer.encode(addition))
+        add_len = len(tokenizer.encode(addition, add_special_tokens=False))
         if current_len + add_len > max_prompt_tokens:
             break
         selected.append(prefix)
