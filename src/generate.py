@@ -211,8 +211,12 @@ def generate_subdomains(
             all_prefixes.update(prefixes)
 
     # Remove known prefixes from results
+    total_before = len(all_prefixes)
     if known:
         all_prefixes -= set(known)
+
+    print(f"Parsed {total_before} unique prefixes, {total_before - len(all_prefixes)} "
+          f"already known, {len(all_prefixes)} novel", file=sys.stderr)
 
     # Convert prefixes to full FQDNs
     return sorted(f"{p}.{root_domain}" for p in all_prefixes)
