@@ -91,7 +91,12 @@ def pretokenize_packed(
     max_seq_len: int = MAX_SEQ_LEN,
     seed: int = 42,
 ):
-    """Tokenize sequences in parallel, then greedily bin-pack into fixed-width rows."""
+    """Tokenize sequences and stream into greedy bin-packing.
+
+    Input is assumed to be pre-shuffled (by preprocess.py Phase 4), so we
+    stream directly from tokenization into packing without buffering the
+    full dataset in RAM. Handles 700M+ line inputs without OOM.
+    """
     pad_id = tokenizer.pad_token_id
 
     # Save tokenizer to temp dir for worker processes
@@ -113,56 +118,49 @@ def pretokenize_packed(
         if batch:
             yield batch
 
-    # Parallel tokenization into memory
-    all_token_ids = []
+    # Stream tokenization directly into greedy bin-packing (no full-dataset buffer)
+    rows = []
+    current_row = []
+    current_len = 0
+    total_seqs = 0
+
     with multiprocessing.Pool(num_workers, initializer=_init_tok_worker,
                               initargs=(tmp_tok_dir, max_seq_len)) as pool:
         for result_batch in pool.imap(
             _tokenize_batch,
-            tqdm(read_batches(input_path), desc="Tokenizing", unit="batch"),
+            tqdm(read_batches(input_path), desc="Tokenizing & packing", unit="batch"),
             chunksize=4,
         ):
-            all_token_ids.extend(result_batch)
+            for token_ids in result_batch:
+                total_seqs += 1
+                seq_len = len(token_ids)
 
-    shutil.rmtree(tmp_tok_dir, ignore_errors=True)
-    print(f"Tokenized {len(all_token_ids)} sequences")
+                if current_len + seq_len <= max_seq_len:
+                    current_row.extend(token_ids)
+                    current_len += seq_len
+                else:
+                    if current_row:
+                        padded = current_row + [pad_id] * (max_seq_len - current_len)
+                        rows.append(padded)
 
-    # Shuffle for diversity before packing
-    random.seed(seed)
-    random.shuffle(all_token_ids)
-
-    # Greedy bin-packing
-    rows = []
-    current_row = []
-    current_len = 0
-
-    for token_ids in tqdm(all_token_ids, desc="Packing"):
-        seq_len = len(token_ids)
-
-        if current_len + seq_len <= max_seq_len:
-            current_row.extend(token_ids)
-            current_len += seq_len
-        else:
-            if current_row:
-                padded = current_row + [pad_id] * (max_seq_len - current_len)
-                rows.append(padded)
-
-            if seq_len <= max_seq_len:
-                current_row = list(token_ids)
-                current_len = seq_len
-            else:
-                current_row = list(token_ids[:max_seq_len])
-                current_len = max_seq_len
+                    if seq_len <= max_seq_len:
+                        current_row = list(token_ids)
+                        current_len = seq_len
+                    else:
+                        current_row = list(token_ids[:max_seq_len])
+                        current_len = max_seq_len
 
     if current_row:
         padded = current_row + [pad_id] * (max_seq_len - current_len)
         rows.append(padded)
 
+    shutil.rmtree(tmp_tok_dir, ignore_errors=True)
+
     num_rows = len(rows)
     non_pad = sum(max_seq_len - row.count(pad_id) if isinstance(row, list) else max_seq_len for row in rows)
 
-    print(f"Packed {len(all_token_ids)} sequences into {num_rows} rows")
-    print(f"Avg sequences per row: {len(all_token_ids) / num_rows:.1f}")
+    print(f"Packed {total_seqs} sequences into {num_rows} rows")
+    print(f"Avg sequences per row: {total_seqs / num_rows:.1f}")
     print(f"Packing efficiency: {non_pad / (num_rows * max_seq_len) * 100:.1f}%")
 
     # Write to memmap
