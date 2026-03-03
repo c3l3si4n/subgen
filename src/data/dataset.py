@@ -179,13 +179,13 @@ class DomainDataset(Dataset):
     """PyTorch Dataset backed by a numpy memmap file.
 
     Handles packed rows containing multiple sequences separated by <eos><bos>
-    boundaries. Produces per-token position_ids that reset at each sequence
-    boundary, and document_ids for building block-diagonal attention masks
-    that prevent cross-sequence attention leaks.
+    boundaries. Position_ids increment monotonically across the packed row
+    (not reset at boundaries) so that RoPE relative distances remain correct
+    when using FA2 with a 2D causal mask. The model learns <eos><bos> as a
+    hard semantic reset.
 
-    Use PackedDataCollator with this dataset to construct proper 4D attention
-    masks for training. Requires attn_implementation="sdpa" (not FA2) since
-    SDPA supports arbitrary 4D causal masks.
+    For strict document isolation with SDPA, use PackedDataCollator with
+    use_fa2=False to pass doc_ids for 4D block-diagonal mask construction.
     """
 
     def __init__(
@@ -219,12 +219,12 @@ class DomainDataset(Dataset):
         doc_ids = is_bos.long().cumsum(0)
         doc_ids[is_pad] = 0
 
-        # Build position_ids that reset at each sequence boundary (vectorized)
-        is_boundary = torch.cat([torch.tensor([True]), doc_ids[1:] != doc_ids[:-1]])
-        arange = torch.arange(self.max_seq_len)
-        boundary_positions = arange * is_boundary.long()
-        last_boundary = torch.cummax(boundary_positions, dim=0).values
-        position_ids = arange - last_boundary
+        # Monotonically increasing position_ids across the packed row.
+        # Resetting at document boundaries would cause RoPE distance=0
+        # collisions between tokens in different documents when using FA2
+        # with a 2D causal mask, corrupting attention patterns.
+        # The model learns <eos><bos> as a hard semantic reset instead.
+        position_ids = torch.arange(self.max_seq_len)
         position_ids[is_pad] = 0
 
         labels = tokens.clone()
@@ -245,8 +245,8 @@ class PackedDataCollator:
 
     Supports two attention modes:
     - flash_attention_2 (default): Passes a 2D attention mask (1=attend, 0=pad).
-      FA2 uses optimized CUDA kernels with O(N) memory. Cross-document attention
-      is naturally attenuated by position_ids that reset at boundaries (RoPE).
+      FA2 uses optimized CUDA kernels with O(N) memory. Position_ids increment
+      monotonically; the model learns <eos><bos> as a semantic boundary.
     - sdpa: Passes compact doc_ids for GPU-side 4D block-diagonal mask construction
       in PackedLlamaForCausalLM. Strict document isolation but forces SDPA math-mode
       fallback (~3-5x slower than FA2).
